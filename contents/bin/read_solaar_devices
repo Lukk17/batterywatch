@@ -31,12 +31,20 @@ SIMULATE = "--simulate" in sys.argv
 
 # Set on the re-exec'd run so a useless interpreter cannot loop forever.
 REEXEC_ENV = "_BW_READ_SOLAR_DEVICES_REEXEC"
+# Set when the re-exec came from the cached runner, so a stale token is
+# forgotten (and rediscovered) instead of looping.
+CACHED_ENV = "_BW_READ_SOLAR_DEVICES_CACHED"
 # Set on the run inside Solaar's Flatpak so it never tries to re-enter itself.
 FLATPAK_ENV = "_BW_READ_SOLAR_DEVICES_FLATPAK"
 
 # Flathub app id of Solaar: its sandbox carries both the library and the
 # hidraw/device permissions, so this helper can be executed inside it.
 FLATPAK_SOLAAR_ID = "io.github.pwr_solaar.solaar"
+
+# Runner cache file (see runner_cache_path): remembers which known-good way to
+# reach logitech_receiver (`python:<abs path>` or `flatpak`) so subsequent
+# polls skip the interpreter probes and Flatpak detection entirely.
+RUNNER_CACHE_NAME = "batterywatch-solaar-runner"
 
 # Where generated rule files are written; tests redirect this to a sandbox dir.
 UDEV_RULES_DIR = "/etc/udev/rules.d"
@@ -280,19 +288,126 @@ def solaar_missing_hint(error=None):
     )
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# runner cache - remember the working interpreter/flatpak between polls
+# ══════════════════════════════════════════════════════════════════════════
+# Tokens are positive-only: a failure is never recorded, so a later Solaar
+# install (or a change of default interpreter) is still discovered.
+def runner_cache_path():
+    """Where the discovered runner is remembered; $XDG_RUNTIME_DIR preferred.
+
+    A per-session tmpfs, writable without a home directory; ~/.cache (or
+    $XDG_CACHE_HOME) is the fallback for desktops without a runtime dir.
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime and os.access(runtime, os.W_OK):
+        return f"{runtime}/{RUNNER_CACHE_NAME}"
+    cache = os.environ.get("XDG_CACHE_HOME") or f"{os.path.expanduser('~')}/.cache"
+    return f"{cache}/batterywatch/{RUNNER_CACHE_NAME}"
+
+
+def cached_runner():
+    """The recorded runner token, or None. Staleness is caught when used.
+
+    Returns "flatpak", "python:/abs/path" (if that path still exists), or
+    None when the file is absent or unreadable. A malformed file is ignored
+    and eventually overwritten.
+    """
+    try:
+        with open(runner_cache_path(), "r", encoding="utf-8") as stream:
+            token = stream.read().strip()
+    except OSError:
+        return None
+    if not token:
+        return None
+    if token == "flatpak":
+        return "flatpak"
+    if token.startswith("python:"):
+        python = token.split(":", 1)[1]
+        if os.path.isfile(python):
+            return f"python:{python}"
+    return None
+
+
+def write_runner_cache(token):
+    """Records a runner that worked; best-effort (a full cache dir is fine)."""
+    path = runner_cache_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as stream:
+            stream.write(token)
+    except OSError as error:
+        debug(f"cannot write runner cache ({error!r})")
+
+
+def clear_runner_cache():
+    """Forgets a runner that stopped working; best-effort."""
+    try:
+        os.remove(runner_cache_path())
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        debug(f"cannot clear runner cache ({error!r})")
+
+
+def exec_into(python, script, cached):
+    """Re-execs this script with `python`; `cached` marks the cache-created hop.
+
+    A hop from the runner cache sets CACHED_ENV, so the re-exec'd run can
+    forget a stale token instead of looping on it.
+    """
+    debug(f"solaar library not importable here, re-exec with {python}"
+          f"{' (cached)' if cached else ''}")
+    environment = dict(os.environ)
+    environment[REEXEC_ENV] = "1"
+    if cached:
+        environment[CACHED_ENV] = "1"
+    else:
+        environment.pop(CACHED_ENV, None)
+    try:
+        os.execve(python, [python, script, *sys.argv[1:]], environment)
+    except OSError as error:
+        debug(f"re-exec with {python} failed ({error!r}); continuing")
+
+
 def load_modules():
     """Imports logitech_receiver, re-execing into a Python that has it.
 
     Tries this interpreter first, then every interpreter discovered from the
     installed Solaar launchers and venvs, so native, pip, pipx, conda and Nix
     installs all resolve to whichever Python actually carries the library.
+
+    The runner cache short-circuits that probe on later polls: once an
+    interpreter imported successfully the next run re-execs into it directly.
+    Stale entries are caught by CACHED_ENV and forgotten, falling back to
+    full rediscovery - never a loop.
     """
     try:
         from logitech_receiver import base, device, receiver
-
-        return _Modules(base, device, receiver)
     except ImportError as error:
         import_error = error
+    else:
+        if os.environ.get(REEXEC_ENV) and not os.environ.get(FLATPAK_ENV):
+            write_runner_cache(f"python:{sys.executable}")
+        return _Modules(base, device, receiver)
+
+    cached = cached_runner()
+    if cached and cached.startswith("python:"):
+        python = cached.split(":", 1)[1]
+        if python == sys.executable:
+            # The cached runner is this interpreter, which just failed to
+            # import: the token is stale. Clear it and rediscover as if newly
+            # started, so a changed default or a fresh install wins.
+            clear_runner_cache()
+            if os.environ.get(CACHED_ENV):
+                os.environ.pop(REEXEC_ENV, None)
+                os.environ.pop(CACHED_ENV, None)
+        else:
+            script = os.path.abspath(__file__)
+            if os.path.isfile(script):
+                exec_into(python, script, cached=True)
+            debug(f"cached interpreter {python} unusable; rediscovering")
+            clear_runner_cache()
 
     script = os.path.abspath(__file__)
     if os.path.isfile(script):
@@ -307,13 +422,7 @@ def load_modules():
                 raise SolaarNotImportable(
                     "Solaar's library cannot be imported even by Solaar's own interpreter"
                 )
-            debug(f"solaar library not importable here, re-exec with {python}")
-            environment = dict(os.environ)
-            environment[REEXEC_ENV] = "1"
-            try:
-                os.execve(python, [python, script, *sys.argv[1:]], environment)
-            except OSError as error:
-                debug(f"re-exec with {python} failed ({error!r}); continuing")
+            exec_into(python, script, cached=False)
     raise SolaarNotImportable(solaar_missing_hint(import_error))
 
 
@@ -383,6 +492,37 @@ def collect_via_flatpak(flatpak, app_id):
     except ValueError:
         debug("flatpak helper did not produce JSON")
         return None
+
+
+def collect_flatpak():
+    """Collects through a Flatpak Solaar's sandbox, if one is usable.
+
+    A cached `flatpak` token skips detection and (part of) the host probing
+    on later polls, but is re-validated by actually running the helper and
+    cleared when it stops working. Returns the JSON document or None.
+    """
+    if os.environ.get(FLATPAK_ENV):
+        # Inside the sandbox we never hand off (or touch the cache): even a
+        # future manifest that grants home/runtime access must keep the inner
+        # run read-only towards the host-side token.
+        return None
+    if cached_runner() == "flatpak":
+        flatpak = shutil.which("flatpak")
+        if not flatpak:
+            clear_runner_cache()
+            return None
+        result = collect_via_flatpak(flatpak, FLATPAK_SOLAAR_ID)
+        if result is None:
+            debug("cached flatpak runner unusable; forgetting it")
+            clear_runner_cache()
+        return result
+    detected = flatpak_solaar_app()
+    if detected is None:
+        return None
+    result = collect_via_flatpak(*detected)
+    if result is not None:
+        write_runner_cache("flatpak")
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -637,6 +777,16 @@ def main():
     if SIMULATE:
         print(json.dumps(simulate()))
         return
+
+    # A cached `flatpak` runner skips host discovery entirely: the last good
+    # run was inside Solaar's sandbox. If it turned stale, collect_flatpak()
+    # clears it and this falls through to the normal host path.
+    if cached_runner() == "flatpak":
+        result = collect_flatpak()
+        if result is not None:
+            print(json.dumps(result))
+            return
+
     unavailable = None
     runtime_error = None
     try:
@@ -651,12 +801,10 @@ def main():
 
     # A Flatpak Solaar is a complete, isolated environment: hand the run over
     # to its own Python instead of the host one that cannot see the library.
-    flatpak = flatpak_solaar_app()
-    if flatpak:
-        result = collect_via_flatpak(*flatpak)
-        if result is not None:
-            print(json.dumps(result))
-            return
+    result = collect_flatpak()
+    if result is not None:
+        print(json.dumps(result))
+        return
     if runtime_error is not None:
         print(json.dumps({"error": "solaar-error", "hint": repr(runtime_error)}))
     else:

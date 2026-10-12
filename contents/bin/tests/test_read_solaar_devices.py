@@ -679,7 +679,8 @@ def test_candidate_interpreters_keeps_distinct_venv_and_base():
 
 def test_load_modules_import_error_no_cli():
     with mock.patch.dict(sys.modules, {"logitech_receiver": None}), \
-            mock.patch.object(rsd, "candidate_interpreters", lambda: [sys.executable]):
+            mock.patch.object(rsd, "candidate_interpreters", lambda: [sys.executable]), \
+            mock.patch.object(rsd, "cached_runner", lambda: None):
         try:
             rsd.load_modules()
         except rsd.SolaarNotImportable as e:
@@ -695,6 +696,7 @@ def test_load_modules_reexec_guard_blocks_a_second_attempt():
             mock.patch.object(rsd, "candidate_interpreters", lambda: ["/venv/python"]), \
             mock.patch.object(rsd, "imports_solaar", lambda python: True), \
             mock.patch.object(rsd.os.path, "isfile", lambda p: True), \
+            mock.patch.object(rsd, "cached_runner", lambda: None), \
             mock.patch.dict(os.environ, {"_BW_READ_SOLAR_DEVICES_REEXEC": "1"}):
         try:
             rsd.load_modules()
@@ -718,6 +720,7 @@ def test_load_modules_reexecs_into_the_first_working_interpreter():
             mock.patch.object(rsd, "imports_solaar", lambda python: True), \
             mock.patch.object(rsd.os.path, "isfile", lambda p: True), \
             mock.patch.object(rsd.os, "execve", fake_execve), \
+            mock.patch.object(rsd, "cached_runner", lambda: None), \
             mock.patch.dict(os.environ, {}, clear=True):
         try:
             rsd.load_modules()
@@ -727,6 +730,161 @@ def test_load_modules_reexecs_into_the_first_working_interpreter():
     # the current interpreter is skipped; the venv interpreter is used
     assert captured["path"] == "/venv/python"
     assert captured["env"][rsd.REEXEC_ENV] == "1"
+    # discovery hops are not cache-created: no CACHED_ENV until proven good
+    assert rsd.CACHED_ENV not in captured["env"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# runner cache: the single positive-only token that skips discovery/probes
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_runner_cache_roundtrip():
+    with tempfile.TemporaryDirectory() as tmp:
+        with mock.patch.object(rsd, "runner_cache_path",
+                               lambda: os.path.join(tmp, "cache")):
+            assert rsd.cached_runner() is None
+            rsd.write_runner_cache("flatpak")
+            assert rsd.cached_runner() == "flatpak"
+            rsd.write_runner_cache(f"python:{sys.executable}")
+            assert rsd.cached_runner() == f"python:{sys.executable}"
+
+
+def test_runner_cache_ignores_empty_and_malformed():
+    with tempfile.TemporaryDirectory() as tmp:
+        with mock.patch.object(rsd, "runner_cache_path",
+                               lambda: os.path.join(tmp, "cache")):
+            with open(os.path.join(tmp, "cache"), "w") as stream:
+                stream.write("garbage-token")
+            assert rsd.cached_runner() is None
+            with open(os.path.join(tmp, "cache"), "w") as stream:
+                stream.write("python:")
+            assert rsd.cached_runner() is None  # no path -> not a python runner
+
+
+def test_runner_cache_forgets_a_stale_python_path():
+    with tempfile.TemporaryDirectory() as tmp:
+        with mock.patch.object(rsd, "runner_cache_path",
+                               lambda: os.path.join(tmp, "cache")), \
+                mock.patch.object(rsd.os.path, "isfile", lambda p: False):
+            rsd.write_runner_cache(f"python:/not/there")
+            assert rsd.cached_runner() is None
+
+
+def test_runner_cache_prefers_xdg_runtime_dir():
+    with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/1000"},
+                         clear=True), \
+            mock.patch.object(rsd.os, "access", lambda p, m: True):
+        assert rsd.runner_cache_path() == "/run/user/1000/batterywatch-solaar-runner"
+    with mock.patch.dict(os.environ, {}, clear=True):
+        assert rsd.runner_cache_path().endswith(".cache/batterywatch/batterywatch-solaar-runner")
+
+
+def test_load_modules_uses_cached_interpreter_without_probing():
+    captured = {}
+
+    def fake_execve(path, argv, env):
+        captured["path"] = path
+        captured["env"] = env
+        raise OSError("stop after the exec attempt")  # keep the test process alive
+
+    with mock.patch.dict(sys.modules, {"logitech_receiver": None}), \
+            mock.patch.object(rsd, "cached_runner", lambda: "python:/cached/python"), \
+            mock.patch.object(rsd, "candidate_interpreters",
+                              lambda: [sys.executable]), \
+            mock.patch.object(rsd.os.path, "isfile", lambda p: True), \
+            mock.patch.object(rsd.os, "execve", fake_execve):
+        try:
+            rsd.load_modules()
+        except rsd.SolaarNotImportable:
+            pass
+
+    # the cached interpreter is re-exec'd into directly...
+    assert captured["path"] == "/cached/python"
+    assert captured["env"][rsd.REEXEC_ENV] == "1"
+    assert captured["env"][rsd.CACHED_ENV] == "1"  # ...as a cache-created hop
+
+
+def test_load_modules_does_not_probe_when_cached_interpreter_present():
+    probes = []
+
+    def fake_imports_solaar(python):
+        probes.append(python)
+        return True
+
+    with mock.patch.dict(sys.modules, {"logitech_receiver": None}), \
+            mock.patch.object(rsd, "cached_runner", lambda: "python:/cached/python"), \
+            mock.patch.object(rsd, "candidate_interpreters", lambda: []), \
+            mock.patch.object(rsd.os.path, "isfile", lambda p: True), \
+            mock.patch.object(rsd.os, "execve",
+                              lambda *a: (_ for _ in ()).throw(OSError("stop"))), \
+            mock.patch.object(rsd, "imports_solaar", fake_imports_solaar):
+        try:
+            rsd.load_modules()
+        except rsd.SolaarNotImportable:
+            pass
+
+    assert probes == []  # 30-240ms probe avoided entirely
+
+
+def test_load_modules_stale_cached_interpreter_redisovers_clean():
+    captured = {}
+
+    def fake_execve(path, argv, env):
+        captured["path"] = path
+        captured["env"] = env
+        raise OSError("stop after the exec attempt")
+
+    with mock.patch.dict(sys.modules, {"logitech_receiver": None}), \
+            mock.patch.object(rsd, "cached_runner",
+                              lambda: f"python:{sys.executable}"), \
+            mock.patch.object(rsd, "candidate_interpreters",
+                              lambda: ["/other/python"]), \
+            mock.patch.object(rsd, "imports_solaar", lambda python: True), \
+            mock.patch.object(rsd.os.path, "isfile", lambda p: True), \
+            mock.patch.object(rsd.os, "execve", fake_execve), \
+            mock.patch.object(rsd, "clear_runner_cache") as clear_called, \
+            mock.patch.dict(os.environ,
+                            {rsd.CACHED_ENV: "1", rsd.REEXEC_ENV: "1"}):
+        try:
+            rsd.load_modules()
+        except rsd.SolaarNotImportable:
+            pass
+
+    # the equal-but-failing interpreter cleared the stale token and popped the
+    # re-exec flags, so the next interpreter is honestly discovered again
+    clear_called.assert_called_once()
+    assert captured["path"] == "/other/python"
+    assert rsd.CACHED_ENV not in captured["env"]  # fresh discovery; not cached
+    assert captured["env"][rsd.REEXEC_ENV] == "1"  # but still one re-exec deep
+
+
+def test_load_modules_reexec_success_writes_the_cache_token():
+    modules = types.SimpleNamespace(base=None, device=None, receiver=None)
+    with mock.patch.dict(sys.modules, {"logitech_receiver": modules}), \
+            mock.patch.dict(os.environ, {rsd.REEXEC_ENV: "1"}), \
+            mock.patch.object(rsd, "write_runner_cache") as writer:
+        rsd.load_modules()
+    writer.assert_called_once_with(f"python:{sys.executable}")
+
+
+def test_load_modules_native_success_does_not_write_the_cache():
+    # the common case (this interpreter has Solaar): no re-exec, no token
+    modules = types.SimpleNamespace(base=None, device=None, receiver=None)
+    with mock.patch.dict(sys.modules, {"logitech_receiver": modules}), \
+            mock.patch.dict(os.environ, {}, clear=True), \
+            mock.patch.object(rsd, "write_runner_cache") as writer:
+        rsd.load_modules()
+    writer.assert_not_called()
+
+
+def test_load_modules_success_inside_flatpak_does_not_write_the_cache():
+    # the sandbox's own interpreter must never claim a host-side token
+    modules = types.SimpleNamespace(base=None, device=None, receiver=None)
+    with mock.patch.dict(sys.modules, {"logitech_receiver": modules}), \
+            mock.patch.dict(os.environ, {rsd.REEXEC_ENV: "1", rsd.FLATPAK_ENV: "1"}), \
+            mock.patch.object(rsd, "write_runner_cache") as writer:
+        rsd.load_modules()
+    writer.assert_not_called()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -794,6 +952,100 @@ def test_collect_via_flatpak_forwards_debug_into_the_sandbox():
 
     # sys.argv inside the sandbox becomes ['-', '--debug'], so diagnostics stay on
     assert calls["cmd"][-1] == "--debug"
+
+
+def test_collect_flatpak_uses_the_cached_token():
+    devices = [{"name": "MX Keys S", "serial": "s"}]
+    with mock.patch.object(rsd, "cached_runner", lambda: "flatpak"), \
+            mock.patch.object(rsd.shutil, "which", lambda name: "/usr/bin/flatpak"), \
+            mock.patch.object(rsd, "collect_via_flatpak",
+                              lambda flatpak, app_id: devices), \
+            mock.patch.object(rsd, "write_runner_cache") as writer, \
+            mock.patch.object(rsd, "clear_runner_cache") as clearer:
+        assert rsd.collect_flatpak() == devices
+    # a proven-good token is neither re-written nor cleared
+    writer.assert_not_called()
+    clearer.assert_not_called()
+
+
+def test_collect_flatpak_stale_token_is_cleared():
+    with mock.patch.object(rsd, "cached_runner", lambda: "flatpak"), \
+            mock.patch.object(rsd.shutil, "which", lambda name: "/usr/bin/flatpak"), \
+            mock.patch.object(rsd, "collect_via_flatpak", lambda flatpak, app_id: None), \
+            mock.patch.object(rsd, "write_runner_cache") as writer, \
+            mock.patch.object(rsd, "clear_runner_cache") as clearer:
+        assert rsd.collect_flatpak() is None
+    clearer.assert_called_once()
+    writer.assert_not_called()
+
+
+def test_collect_flatpak_cached_token_without_flatpak_binary_clears():
+    with mock.patch.object(rsd, "cached_runner", lambda: "flatpak"), \
+            mock.patch.object(rsd.shutil, "which", lambda name: None), \
+            mock.patch.object(rsd, "clear_runner_cache") as clearer:
+        assert rsd.collect_flatpak() is None
+    clearer.assert_called_once()
+
+
+def test_collect_flatpak_detects_and_caches_on_success():
+    devices = [{"name": "M305", "serial": "s"}]
+    with mock.patch.object(rsd, "cached_runner", lambda: None), \
+            mock.patch.object(rsd, "flatpak_solaar_app",
+                              lambda: ("/usr/bin/flatpak", rsd.FLATPAK_SOLAAR_ID)), \
+            mock.patch.object(rsd, "collect_via_flatpak",
+                              lambda flatpak, app_id: devices), \
+            mock.patch.object(rsd, "write_runner_cache") as writer:
+        assert rsd.collect_flatpak() == devices
+    writer.assert_called_once_with("flatpak")
+
+
+def test_collect_flatpak_detection_failure_returns_none_without_cache():
+    with mock.patch.object(rsd, "cached_runner", lambda: None), \
+            mock.patch.object(rsd, "flatpak_solaar_app", lambda: None), \
+            mock.patch.object(rsd, "write_runner_cache") as writer:
+        assert rsd.collect_flatpak() is None
+    writer.assert_not_called()
+
+
+def test_collect_flatpak_inside_sandbox_touches_nothing():
+    # The inner run must never hand off or manage the host-side cache, even if
+    # a future manifest exposes it: FLATPAK_ENV short-circuits everything.
+    with mock.patch.dict(os.environ, {rsd.FLATPAK_ENV: "1"}), \
+            mock.patch.object(rsd, "cached_runner",
+                              lambda: (_ for _ in ()).throw(AssertionError("cache read"))), \
+            mock.patch.object(rsd, "write_runner_cache") as writer, \
+            mock.patch.object(rsd, "clear_runner_cache") as clearer:
+        assert rsd.collect_flatpak() is None
+    writer.assert_not_called()
+    clearer.assert_not_called()
+
+
+def test_main_cached_flatpak_skips_host_discovery():
+    devices = [{"name": "M305", "serial": "s"}]
+    buffer = io.StringIO()
+    with mock.patch.object(rsd, "cached_runner", lambda: "flatpak"), \
+            mock.patch.object(rsd, "collect_flatpak", lambda: devices), \
+            mock.patch.object(rsd, "load_modules",
+                              lambda: (_ for _ in ()).throw(AssertionError("host probed"))):
+        with redirect_stdout(buffer):
+            rsd.main()
+    assert json.loads(buffer.getvalue().strip()) == devices
+
+
+def test_main_stale_flatpak_cache_falls_back_to_host_path():
+    # a stale flatpak token returns None from collect_flatpak; main falls back
+    # to the normal host path (which reports the real error object)
+    def raise_unimportable():
+        raise rsd.SolaarNotImportable("not installed")
+
+    buffer = io.StringIO()
+    with mock.patch.object(rsd, "cached_runner", lambda: "flatpak"), \
+            mock.patch.object(rsd, "collect_flatpak", lambda: None), \
+            mock.patch.object(rsd, "load_modules", raise_unimportable):
+        with redirect_stdout(buffer):
+            rsd.main()
+    parsed = json.loads(buffer.getvalue().strip())
+    assert parsed["error"] == "solaar-missing"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -872,7 +1124,9 @@ def test_main_unavailable_path_prints_error_object():
 
     buffer = io.StringIO()
     with mock.patch.object(rsd, "load_modules", raise_unimportable), \
-            mock.patch.object(rsd, "flatpak_solaar_app", lambda: None):
+            mock.patch.object(rsd, "flatpak_solaar_app", lambda: None), \
+            mock.patch.object(rsd, "cached_runner", lambda: None), \
+            mock.patch.object(rsd, "collect_flatpak", lambda: None):
         with redirect_stdout(buffer):
             rsd.main()
     parsed = json.loads(buffer.getvalue().strip())
