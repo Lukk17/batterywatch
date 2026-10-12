@@ -630,12 +630,56 @@ def test_shebang_python_rejects_env_and_shims():
     assert rsd.parse_shebang_python("env -S /opt/pyvenv/bin/python") == "/opt/pyvenv/bin/python"
 
 
-def test_load_modules_import_error_no_cli():
-    def fail_import():
-        raise rsd.SolaarNotImportable("unreachable")
+def test_solaar_launchers_prefers_path_and_dedups():
+    with mock.patch.object(rsd.shutil, "which", lambda name: "/usr/bin/solaar"), \
+            mock.patch.object(rsd.os.path, "isfile", lambda p: True):
+        launchers = rsd.solaar_launchers()
+    # PATH entry comes first and known-prefix duplicates of it are dropped
+    assert launchers[0] == "/usr/bin/solaar"
+    assert launchers.count("/usr/bin/solaar") == 1
 
+
+def test_candidate_interpreters_tries_current_first():
+    candidates = rsd.candidate_interpreters()
+    assert candidates[0] == sys.executable
+
+
+def test_discovery_dirs_honor_environment():
+    # hardcoded ~/.local/share/pipx and ~/miniconda3 must yield to the env vars
+    with mock.patch.dict(os.environ, {"PIPX_HOME": "/opt/pipx", "CONDA_PREFIX": "/opt/conda"},
+                         clear=True):
+        assert rsd.pipx_venvs_dir() == "/opt/pipx/venvs"
+        assert "/opt/conda/bin" in rsd.conda_bin_dirs()
+    with mock.patch.dict(os.environ, {"XDG_DATA_HOME": "/xdg"}, clear=True):
+        assert rsd.pipx_venvs_dir() == "/xdg/pipx/venvs"
+
+
+def test_candidate_interpreters_keeps_distinct_venv_and_base():
+    # A venv's bin/python is a symlink to the base interpreter: same realpath,
+    # different site-packages. Dedup must key on the literal path or the very
+    # interpreter that carries Solaar is discarded (the default pipx layout).
+    with tempfile.TemporaryDirectory() as tmp:
+        base = os.path.join(tmp, "python3")
+        with open(base, "w") as stream:
+            stream.write("#!/bin/sh\n")
+        venv_bin = os.path.join(tmp, "venv", "bin")
+        os.makedirs(venv_bin)
+        venv_python = os.path.join(venv_bin, "python")
+        os.symlink(base, venv_python)
+
+        with mock.patch.object(rsd.sys, "executable", venv_python), \
+                mock.patch.object(rsd.shutil, "which",
+                                  lambda name: base if name == "python3" else None), \
+                mock.patch.object(rsd.glob, "glob", lambda pattern: []):
+            candidates = rsd.candidate_interpreters()
+
+    assert venv_python in candidates
+    assert base in candidates  # not collapsed away by realpath
+
+
+def test_load_modules_import_error_no_cli():
     with mock.patch.dict(sys.modules, {"logitech_receiver": None}), \
-            mock.patch.object(rsd, "solaar_interpreter", lambda: None):
+            mock.patch.object(rsd, "candidate_interpreters", lambda: [sys.executable]):
         try:
             rsd.load_modules()
         except rsd.SolaarNotImportable as e:
@@ -648,7 +692,8 @@ def test_load_modules_import_error_no_cli():
 def test_load_modules_reexec_guard_blocks_a_second_attempt():
     # the re-exec flag is set: the fallback interpreter will not be tried again
     with mock.patch.dict(sys.modules, {"logitech_receiver": None}), \
-            mock.patch.object(rsd, "solaar_interpreter", lambda: "/venv/python"), \
+            mock.patch.object(rsd, "candidate_interpreters", lambda: ["/venv/python"]), \
+            mock.patch.object(rsd, "imports_solaar", lambda python: True), \
             mock.patch.object(rsd.os.path, "isfile", lambda p: True), \
             mock.patch.dict(os.environ, {"_BW_READ_SOLAR_DEVICES_REEXEC": "1"}):
         try:
@@ -657,6 +702,98 @@ def test_load_modules_reexec_guard_blocks_a_second_attempt():
             assert "even by Solaar's own interpreter" in str(e)
         else:
             raise AssertionError("expected SolaarNotImportable")
+
+
+def test_load_modules_reexecs_into_the_first_working_interpreter():
+    captured = {}
+
+    def fake_execve(path, argv, env):
+        captured["path"] = path
+        captured["env"] = env
+        raise OSError("stop after the exec attempt")  # keep the test process alive
+
+    with mock.patch.dict(sys.modules, {"logitech_receiver": None}), \
+            mock.patch.object(rsd, "candidate_interpreters",
+                              lambda: [sys.executable, "/venv/python"]), \
+            mock.patch.object(rsd, "imports_solaar", lambda python: True), \
+            mock.patch.object(rsd.os.path, "isfile", lambda p: True), \
+            mock.patch.object(rsd.os, "execve", fake_execve), \
+            mock.patch.dict(os.environ, {}, clear=True):
+        try:
+            rsd.load_modules()
+        except rsd.SolaarNotImportable:
+            pass
+
+    # the current interpreter is skipped; the venv interpreter is used
+    assert captured["path"] == "/venv/python"
+    assert captured["env"][rsd.REEXEC_ENV] == "1"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# lib: Flatpak sandbox hand-off
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_flatpak_solaar_app_none_without_flatpak():
+    with mock.patch.object(rsd.shutil, "which", lambda name: None):
+        assert rsd.flatpak_solaar_app() is None
+
+
+def test_flatpak_solaar_app_detects_installed_app():
+    done = types.SimpleNamespace(returncode=0)
+    with mock.patch.object(rsd.shutil, "which", lambda name: "/usr/bin/flatpak"), \
+            mock.patch.object(rsd.subprocess, "run", lambda *a, **k: done):
+        assert rsd.flatpak_solaar_app() == ("/usr/bin/flatpak", rsd.FLATPAK_SOLAAR_ID)
+
+
+def test_flatpak_solaar_app_skips_inside_sandbox():
+    # FLATPAK_ENV is set when running inside the sandbox: never recurse
+    with mock.patch.dict(os.environ, {rsd.FLATPAK_ENV: "1"}), \
+            mock.patch.object(rsd.shutil, "which", lambda name: "/usr/bin/flatpak"):
+        assert rsd.flatpak_solaar_app() is None
+
+
+def test_collect_via_flatpak_feeds_script_on_stdin_and_parses_json():
+    devices = [{"name": "MX Master 3S", "serial": "s", "percentage": 72}]
+    done = types.SimpleNamespace(returncode=0, stdout=json.dumps(devices).encode(),
+                                 stderr=b"")
+    calls = {}
+
+    def fake_run(cmd, **kwargs):
+        calls["cmd"] = cmd
+        calls["input"] = kwargs.get("input")
+        calls["env"] = kwargs.get("env")
+        return done
+
+    with mock.patch.object(rsd.subprocess, "run", fake_run):
+        result = rsd.collect_via_flatpak("/usr/bin/flatpak", rsd.FLATPAK_SOLAAR_ID)
+
+    assert result == devices
+    assert calls["cmd"] == ["/usr/bin/flatpak", "run", "--command=python3",
+                            rsd.FLATPAK_SOLAAR_ID, "-"]
+    assert b"logitech_receiver" in calls["input"]  # the helper's own source
+    assert calls["env"][rsd.FLATPAK_ENV] == "1"
+
+
+def test_collect_via_flatpak_returns_none_on_failure():
+    done = types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"boom")
+    with mock.patch.object(rsd.subprocess, "run", lambda *a, **k: done):
+        assert rsd.collect_via_flatpak("/usr/bin/flatpak", rsd.FLATPAK_SOLAAR_ID) is None
+
+
+def test_collect_via_flatpak_forwards_debug_into_the_sandbox():
+    done = types.SimpleNamespace(returncode=0, stdout=b"[]", stderr=b"")
+    calls = {}
+
+    def fake_run(cmd, **kwargs):
+        calls["cmd"] = cmd
+        return done
+
+    with mock.patch.object(rsd, "DEBUG", True), \
+            mock.patch.object(rsd.subprocess, "run", fake_run):
+        rsd.collect_via_flatpak("/usr/bin/flatpak", rsd.FLATPAK_SOLAAR_ID)
+
+    # sys.argv inside the sandbox becomes ['-', '--debug'], so diagnostics stay on
+    assert calls["cmd"][-1] == "--debug"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -734,7 +871,8 @@ def test_main_unavailable_path_prints_error_object():
         raise rsd.SolaarNotImportable("not installed")
 
     buffer = io.StringIO()
-    with mock.patch.object(rsd, "load_modules", raise_unimportable):
+    with mock.patch.object(rsd, "load_modules", raise_unimportable), \
+            mock.patch.object(rsd, "flatpak_solaar_app", lambda: None):
         with redirect_stdout(buffer):
             rsd.main()
     parsed = json.loads(buffer.getvalue().strip())

@@ -16,17 +16,27 @@ drop until the next poll (stateless).
 
 from __future__ import annotations
 
+import glob
 import json
 import os
+import shutil
+import subprocess
 import sys
 
 # --debug enables stderr diagnostics; stdout stays pure JSON either way.
 DEBUG = "--debug" in sys.argv
-# --simulate runs without Solaar or hardware; both flags survive a re-exec.
+# --simulate runs without Solaar or hardware; both flags survive an interpreter
+# re-exec, and --debug is also forwarded into the Flatpak sandbox.
 SIMULATE = "--simulate" in sys.argv
 
 # Set on the re-exec'd run so a useless interpreter cannot loop forever.
 REEXEC_ENV = "_BW_READ_SOLAR_DEVICES_REEXEC"
+# Set on the run inside Solaar's Flatpak so it never tries to re-enter itself.
+FLATPAK_ENV = "_BW_READ_SOLAR_DEVICES_FLATPAK"
+
+# Flathub app id of Solaar: its sandbox carries both the library and the
+# hidraw/device permissions, so this helper can be executed inside it.
+FLATPAK_SOLAAR_ID = "io.github.pwr_solaar.solaar"
 
 # Where generated rule files are written; tests redirect this to a sandbox dir.
 UDEV_RULES_DIR = "/etc/udev/rules.d"
@@ -136,15 +146,10 @@ def parse_shebang_python(line):
     return argv0
 
 
-def solaar_interpreter():
-    """The python behind the installed solaar CLI (for pipx/venv installs)."""
-    import shutil
-
-    binary = shutil.which("solaar")
-    if binary is None:
-        return None
+def read_shebang(path):
+    """The interpreter a script's `#!` line points at, or None for binaries."""
     try:
-        with open(binary, "rb") as stream:
+        with open(path, "rb") as stream:
             first = stream.readline(256)
     except OSError:
         return None
@@ -153,25 +158,231 @@ def solaar_interpreter():
     return parse_shebang_python(first[2:].decode("utf-8", "replace").strip())
 
 
+def pipx_venvs_dir():
+    """pipx's venv root, honoring PIPX_HOME and XDG_DATA_HOME."""
+    pipx_home = os.environ.get("PIPX_HOME")
+    if pipx_home:
+        return f"{pipx_home}/venvs"
+    data_home = os.environ.get("XDG_DATA_HOME") or f"{os.path.expanduser('~')}/.local/share"
+    return f"{data_home}/pipx/venvs"
+
+
+def conda_bin_dirs():
+    """Conda environment bin dirs: the active env first, then common defaults."""
+    home = os.path.expanduser("~")
+    dirs = []
+    prefix = os.environ.get("CONDA_PREFIX")
+    if prefix:
+        dirs.append(f"{prefix}/bin")
+    executable = os.environ.get("CONDA_EXE")
+    if executable:
+        dirs.append(os.path.dirname(executable))
+    dirs.extend((f"{home}/miniconda3/bin", f"{home}/anaconda3/bin"))
+    return dirs
+
+
+def solaar_launchers():
+    """Every plausible `solaar` entry point: PATH first, then known prefixes.
+
+    PATH alone misses a pipx install whose desktop entry works but whose
+    `~/.local/bin` is absent from a GUI session's PATH, `/usr/local` installs,
+    conda, and the `make install_pipx` layout. The Flatpak export is namespaced
+    (io.github.pwr_solaar.solaar) so it never appears as `solaar` here at all.
+    """
+    found = []
+    which = shutil.which("solaar")
+    if which:
+        found.append(which)
+    home = os.path.expanduser("~")
+    patterns = [
+        f"{home}/.local/bin/solaar",
+        "/usr/local/bin/solaar",
+        "/usr/bin/solaar",
+        "/opt/solaar/bin/solaar",
+        f"{pipx_venvs_dir()}/*/bin/solaar",
+    ]
+    patterns.extend(f"{directory}/solaar" for directory in conda_bin_dirs())
+    for pattern in patterns:
+        found.extend(sorted(glob.glob(pattern)))
+    # Keep discovery order; dedupe literal paths only, never resolve symlinks.
+    seen, result = set(), []
+    for path in found:
+        if path not in seen and os.path.isfile(path):
+            seen.add(path)
+            result.append(path)
+    return result
+
+
+def candidate_interpreters():
+    """Interpreters worth probing for logitech_receiver, most likely first.
+
+    The current interpreter, then each launcher's shebang interpreter (native,
+    pip, pipx, venv, Nix), then pipx/conda/venv pythons, then the usual system
+    and user locations. Dedupe keys on the literal path, never realpath: a
+    venv's `bin/python` is a symlink to its base interpreter, and `argv0` is
+    exactly what decides a venv's `sys.prefix`, so collapsing by realpath would
+    hide the very interpreter that carries the library (the pipx case).
+    """
+    home = os.path.expanduser("~")
+    candidates = [sys.executable]
+    for launcher in solaar_launchers():
+        python = read_shebang(launcher)
+        if python:
+            candidates.append(python)
+    candidates.extend(sorted(glob.glob(f"{pipx_venvs_dir()}/*/bin/python")))
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env:
+        candidates.append(f"{virtual_env}/bin/python")
+    candidates.extend(f"{directory}/python" for directory in conda_bin_dirs())
+    candidates.extend([
+        shutil.which("python3"),
+        shutil.which("python"),
+        "/usr/bin/python3",
+        "/usr/local/bin/python3",
+        f"{home}/.local/bin/python3",
+    ])
+    seen, result = set(), []
+    for path in candidates:
+        if not path or not os.path.isfile(path):
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        result.append(path)
+    return result
+
+
+def imports_solaar(python):
+    """True when `python` can run the exact imports this helper depends on."""
+    try:
+        done = subprocess.run(
+            [python, "-c",
+             "import logitech_receiver.base, logitech_receiver.device, logitech_receiver.receiver"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def solaar_missing_hint(error=None):
+    """User-facing explanation naming what was tried, plus the real cause."""
+    detail = f" ({error})" if error else ""
+    return (
+        "Solaar's Python library (logitech_receiver) is not importable from any "
+        "interpreter found on this system" + detail + ". "
+        "Install Solaar via your distribution's package manager, or "
+        "`python3 -m pip install solaar`. A Flatpak Solaar is used through its "
+        "own sandbox when available; a Snap Solaar is sandboxed and not "
+        "reachable from the widget."
+    )
+
+
 def load_modules():
-    """Imports logitech_receiver; re-execs with Solaar's python for pipx installs."""
+    """Imports logitech_receiver, re-execing into a Python that has it.
+
+    Tries this interpreter first, then every interpreter discovered from the
+    installed Solaar launchers and venvs, so native, pip, pipx, conda and Nix
+    installs all resolve to whichever Python actually carries the library.
+    """
     try:
         from logitech_receiver import base, device, receiver
 
         return _Modules(base, device, receiver)
-    except ImportError:
-        pass
-    python = solaar_interpreter()
-    if python and python != sys.executable and os.path.isfile(python):
-        if os.environ.get(REEXEC_ENV):
-            raise SolaarNotImportable("Solaar's library cannot be imported even by Solaar's own interpreter")
-        debug(f"solaar library not importable here, re-exec with {python}")
-        os.environ[REEXEC_ENV] = "1"
-        os.execve(python, [python, os.path.abspath(__file__), *sys.argv[1:]], os.environ)
-    raise SolaarNotImportable(
-        "Solaar's Python library (logitech_receiver) is not importable. "
-        "Install Solaar via your distribution's package manager, or `python3 -m pip install solaar`."
-    )
+    except ImportError as error:
+        import_error = error
+
+    script = os.path.abspath(__file__)
+    if os.path.isfile(script):
+        for python in candidate_interpreters():
+            # literal comparison, not realpath: a venv python shares its
+            # realpath with the base interpreter but is a different env
+            if python == sys.executable:
+                continue
+            if not imports_solaar(python):
+                continue
+            if os.environ.get(REEXEC_ENV):
+                raise SolaarNotImportable(
+                    "Solaar's library cannot be imported even by Solaar's own interpreter"
+                )
+            debug(f"solaar library not importable here, re-exec with {python}")
+            environment = dict(os.environ)
+            environment[REEXEC_ENV] = "1"
+            try:
+                os.execve(python, [python, script, *sys.argv[1:]], environment)
+            except OSError as error:
+                debug(f"re-exec with {python} failed ({error!r}); continuing")
+    raise SolaarNotImportable(solaar_missing_hint(import_error))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# flatpak - execute this helper inside Solaar's sandbox
+# ══════════════════════════════════════════════════════════════════════════
+def flatpak_solaar_app():
+    """(flatpak, app_id) when Solaar's Flathub app is installed, else None.
+
+    The sandboxed library is unreachable from the host interpreter, so the
+    only faithful way to read battery data is to run inside the sandbox.
+    """
+    if os.environ.get(FLATPAK_ENV):
+        return None
+    flatpak = shutil.which("flatpak")
+    if not flatpak:
+        return None
+    try:
+        done = subprocess.run(
+            [flatpak, "info", FLATPAK_SOLAAR_ID],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return flatpak, FLATPAK_SOLAAR_ID
+
+
+def collect_via_flatpak(flatpak, app_id):
+    """Runs this same helper inside Solaar's sandbox and returns its JSON.
+
+    The script is fed on stdin (`python3 -`), so nothing needs to be visible
+    to the sandbox, and the run inherits Solaar's own hidraw/device access.
+    """
+    try:
+        with open(os.path.abspath(__file__), "rb") as stream:
+            source = stream.read()
+    except OSError as error:
+        debug(f"cannot read own script for the flatpak re-run ({error!r})")
+        return None
+    command = [flatpak, "run", "--command=python3", app_id, "-"]
+    if DEBUG:
+        # argv inside the sandbox becomes ['-', '--debug']: keep diagnostics
+        command.append("--debug")
+    environment = dict(os.environ, **{FLATPAK_ENV: "1"})
+    try:
+        done = subprocess.run(
+            command,
+            input=source,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+            env=environment,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        debug(f"flatpak run failed ({error!r})")
+        return None
+    if done.returncode != 0:
+        debug("flatpak helper exited "
+              f"{done.returncode}: {done.stderr.decode('utf-8', 'replace').strip()}")
+        return None
+    try:
+        return json.loads(done.stdout.decode("utf-8", "replace").strip())
+    except ValueError:
+        debug("flatpak helper did not produce JSON")
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -426,12 +637,30 @@ def main():
     if SIMULATE:
         print(json.dumps(simulate()))
         return
+    unavailable = None
+    runtime_error = None
     try:
         print(json.dumps(collect()))
-    except SolaarNotImportable as unavailable:
-        print(json.dumps({"error": "solaar-missing", "hint": str(unavailable)}))
+        return
+    except SolaarNotImportable as error:
+        unavailable = error
+        debug(f"host Solaar unusable: {error}")
     except Exception as error:  # e.g. pyudev breakage; the traceback stays on stderr
-        print(json.dumps({"error": "solaar-error", "hint": repr(error)}))
+        runtime_error = error
+        debug(f"host Solaar failed at runtime: {error!r}")
+
+    # A Flatpak Solaar is a complete, isolated environment: hand the run over
+    # to its own Python instead of the host one that cannot see the library.
+    flatpak = flatpak_solaar_app()
+    if flatpak:
+        result = collect_via_flatpak(*flatpak)
+        if result is not None:
+            print(json.dumps(result))
+            return
+    if runtime_error is not None:
+        print(json.dumps({"error": "solaar-error", "hint": repr(runtime_error)}))
+    else:
+        print(json.dumps({"error": "solaar-missing", "hint": str(unavailable)}))
 
 
 if __name__ == "__main__":
