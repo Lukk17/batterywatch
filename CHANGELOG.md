@@ -8,6 +8,7 @@
 ### Changed
 - **Providers fill each other's gaps** — a device reported by two providers is one entry: the higher-priority reading stays, and the later provider fills what it left missing — a percentage it does not have, or the charging state it cannot know. A permission-blocked entry is replaced as soon as another provider reads the device
 - **Bluetooth devices UPower reports without a serial are now identified by their MAC** — the identity BlueZ and Solaar report them under, so the same device merges into one entry instead of two. A device hidden under its old path-based identity might reappear and would need hiding again due to this change
+- **Solaar discovered however it was installed** — the helper re-executes into whichever Python carries Solaar's library (distro/pip/pipx/conda/NixOS/venv), hands off to a Flatpak Solaar's own sandbox, caches the proven-good runner between polls, and explains what it tried when Solaar is missing
 
 ### Contributors
 - @birrkan — BlueZ integration (initial BluezQt implementation, reworked to bluetoothctl during review)
