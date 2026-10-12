@@ -14,6 +14,43 @@ Devices that are offline, asleep or lack battery support report nothing and
 drop until the next poll (stateless).
 """
 
+# ── file map ──────────────────────────────────────────────────────────────
+# A poll: main() picks a "runner" (the way to reach logitech_receiver) and
+# collect() reads the batteries through it. The runner is one of:
+#   native        this interpreter already has the library
+#   python:X      re-exec into interpreter X   (load_modules / exec_into)
+#   flatpak       run inside Solaar's sandbox  (collect_flatpak)
+#
+# Sections (in file order):
+#   discovery     pipx/conda dirs + every plausible `solaar` launcher ->
+#                 candidate_interpreters (who to probe), the probe
+#                 (imports_solaar), and the hint when nothing works
+#                 (solaar_missing_hint)
+#   runner cache  the token file (runner_cache_path / cached_runner /
+#                 write_runner_cache / clear_runner_cache), the re-exec
+#                 jump (exec_into), and load_modules - where the cache is
+#                 consulted and the native-import decision is made
+#   flatpak       detect the app (flatpak_solaar_app), run the helper
+#                 inside it (collect_via_flatpak), and the cached/fallback
+#                 entry (collect_flatpak)
+#   loop          collect() walks devices - open_items / device_entry /
+#                 receiver_entries / _fold - into widget JSON
+#   cli           simulate() and main(), the dispatcher
+#
+# Where the cache is touched (the three moments):
+#   read     main()            -> cached runner == "flatpak"?
+#            load_modules()    -> cached "python:..."?
+#   write    load_modules()    after a re-exec'd run imports OK (positive-only)
+#            collect_flatpak() after a Flatpak run returns JSON
+#   clear    only when a cached runner fails (never on a plain miss)
+#
+# Flags that survive a re-exec (defined near the top):
+#   REEXEC   this run is already a re-exec - one hop, no second candidate
+#   CACHED   this hop came FROM the cache - failure = stale token, so
+#            clear + rediscover instead of raising
+#   FLATPAK  we are inside the sandbox - never hand off or touch the cache
+# ──────────────────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 
 import glob
