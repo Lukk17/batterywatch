@@ -8,9 +8,11 @@
 ### Changed
 - **Providers fill each other's gaps** — a device reported by two providers is one entry: the higher-priority reading stays, and the later provider fills what it left missing — a percentage it does not have, or the charging state it cannot know. A permission-blocked entry is replaced as soon as another provider reads the device
 - **Bluetooth devices UPower reports without a serial are now identified by their MAC** — the identity BlueZ and Solaar report them under, so the same device merges into one entry instead of two. A device hidden under its old path-based identity might reappear and would need hiding again due to this change
+- **Solaar discovered however it was installed** — the helper re-executes into whichever Python carries Solaar's library (distro/pip/pipx/conda/NixOS/venv), hands off to a Flatpak Solaar's own sandbox, caches the proven-good runner between polls, and explains what it tried when Solaar is missing. Confirmed on a Flathub-installed Solaar 1.1.20 (system scope) — the setup that previously failed — where the keyboard, mouse and headset that UPower never reported finally appeared once the hidraw rule was copied (issue #2)
 
 ### Contributors
 - @birrkan — BlueZ integration (initial BluezQt implementation, reworked to bluetoothctl during review)
+- @CorneliusKluge — issue #2: tireless on-device testing across many builds, from the first hidraw diagnostics to confirming the Flatpak discovery on his Flathub setup; his detailed reports and patience shaped this whole integration — thank you!
 
 ## [0.3.2] - 2026-10-05
 

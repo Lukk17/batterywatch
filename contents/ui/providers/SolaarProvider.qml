@@ -8,9 +8,12 @@ import "../DeviceUtils.js" as DeviceUtils
 //
 // Uses a small Python helper (bin/read_solaar_devices) that talks to Solaar's
 // logitech_receiver module and returns the same JSON schema as read_hid_devices.
-// Requires Solaar (distro package, pip or pipx); when the library is missing
-// the helper reports {"error": "solaar-missing", ...} and the provider stays
-// empty with a console note - the widget simply has no Solaar devices then.
+// Works with Solaar installed from a distro package, pip, pipx, conda or Nix
+// (the helper finds the interpreter that carries the library) and, for a
+// Flatpak Solaar, runs itself inside that sandbox. When Solaar is missing or
+// sandboxed with no reachable library (Snap), the helper reports
+// {"error": "solaar-missing", ...} and the provider stays empty with a console
+// note - the widget simply has no Solaar devices then.
 Item {
     id: root
     visible: false
