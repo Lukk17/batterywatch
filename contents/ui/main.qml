@@ -63,6 +63,9 @@ PlasmoidItem {
     // (the HID provider simulates a blocked device when debug is on)
     property var allDevices: debugMode ? testDevices.concat(realDevices) : realDevices
 
+    //Notification
+    property bool notificationEnabled: Plasmoid.configuration.notificationEnabled
+
     // ═══════════════════════════════════════════════════════════════════════
     // DEVICE STATE
     // ═══════════════════════════════════════════════════════════════════════
@@ -70,6 +73,7 @@ PlasmoidItem {
     // Merged devices from all providers
     property var realDevices: mergeDevices(providers.map(p => p.devices))
     property var hiddenDevices: []
+    property var notificationEnabledDevices: []
 
     property int visibleDeviceCount: {
         var count = 0;
@@ -316,6 +320,10 @@ PlasmoidItem {
         Plasmoid.configuration.hiddenDevices = hiddenDevices.join(i18n(", "));
     }
 
+    function saveNotificationEnabledDevices() {
+        Plasmoid.configuration.notificationEnabledDevices = notificationEnabledDevices.join(i18n(", "));
+    }
+
     function toggleDeviceVisibility(device) {
         var id = DeviceUtils.deviceIdentity(device);
         var index = hiddenDevices.indexOf(id);
@@ -326,6 +334,18 @@ PlasmoidItem {
         }
         hiddenDevices = hiddenDevices.slice();
         saveHiddenDevices();
+    }
+
+    function toggleDeviceNotification(device) {
+        var id = DeviceUtils.deviceIdentity(device);
+        var index = notificationEnabledDevices.indexOf(id);
+        if (index === -1) {
+            notificationEnabledDevices.push(id);
+        } else {
+            notificationEnabledDevices.splice(index, 1);
+        }
+        notificationEnabledDevices = notificationEnabledDevices.slice();
+        saveNotificationEnabledDevices();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -606,6 +626,25 @@ PlasmoidItem {
 
                                             PlasmaComponents.ToolTip {
                                                 text: root.hiddenDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? i18n("Hide from tray") : i18n("Show in tray")
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onPressed: mouse.accepted = false
+                                            }
+                                        }
+
+                                        PlasmaComponents.ToolButton {
+                                            visible: notificationEnabled
+                                            icon.name: root.notificationEnabledDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? "notification-disabled" : "notification-active"
+                                            text: root.notificationEnabledDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? i18n("Enable Notification") : i18n("Disable Notification")
+                                            display: PlasmaComponents.AbstractButton.IconOnly
+                                            onClicked: toggleDeviceNotification(device)
+
+                                            PlasmaComponents.ToolTip {
+                                                text: root.notificationEnabledDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? i18n("Enable Notification") : i18n("Disable Notification")
                                             }
 
                                             MouseArea {

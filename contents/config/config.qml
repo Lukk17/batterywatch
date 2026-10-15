@@ -17,4 +17,9 @@ ConfigModel {
         icon: "settings-configure"
         source: "config/AdvancedSettings.qml"
     }
+    ConfigCategory {
+        name: i18n("Notification")
+        icon: "notification-active"
+        source: "config/Notifications.qml"
+    }
 }
