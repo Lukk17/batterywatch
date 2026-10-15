@@ -131,7 +131,7 @@ PlasmoidItem {
     // Notification
     Notification {
         id: batteryNotification
-        componentName: "plasma_workspace"
+        componentName: "plasma_workspace" //this is easier than trying to place .nofifyrc file
         eventId: "notification"
         title: "BatteryWatch"
         text:  "BatteryWatch notification"
@@ -185,6 +185,7 @@ PlasmoidItem {
                             var label = battery.label || ""
                             var key = identity + ":" + (label || j)
 
+                            //greater than 0 since some devices show 0% when turned off.
                             if (percentage <= notificationThreshold && percentage > 0) {
                                 if (!notifiedLowBattery[key]) {
                                     notifiedLowBattery[key] = true
