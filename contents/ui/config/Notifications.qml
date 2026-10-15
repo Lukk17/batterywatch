@@ -10,6 +10,7 @@ KCMUtils.SimpleKCM {
     id: root
 
     property alias cfg_notificationEnabled: notificationEnabled.checked
+    property alias cfg_notificationThreshold: notificationThreshold.value
 
     Kirigami.FormLayout {
         id: page

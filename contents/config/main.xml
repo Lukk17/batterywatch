@@ -14,9 +14,6 @@
     <entry name="debugMode" type="Bool">
       <default>false</default>
     </entry>
-    <entry name="notificationEnabled" type="Bool">
-      <default>false</default>
-    </entry>
   </group>
 
   <!-- Appearance -->
@@ -175,6 +172,16 @@
     </entry>
     <entry name="headsetControlPollingTime" type="Int">
       <default>5</default>
+    </entry>
+  </group>
+
+  <!-- Notification -->
+  <group name="Notification">
+    <entry name="notificationEnabled" type="Bool">
+      <default>false</default>
+    </entry>
+    <entry name="notificationThreshold" type="Int">
+      <default>20</default>
     </entry>
   </group>
 </kcfg>

@@ -5,6 +5,7 @@ import org.kde.plasma.components 3.0 as PlasmaComponents
 import org.kde.plasma.core as PlasmaCore
 import org.kde.kirigami 2.20 as Kirigami
 import org.kde.plasma.plasma5support 2.0 as P5Support
+import org.kde.notification
 import "providers"
 import "DeviceUtils.js" as DeviceUtils
 
@@ -64,7 +65,10 @@ PlasmoidItem {
     property var allDevices: debugMode ? testDevices.concat(realDevices) : realDevices
 
     //Notification
-    property bool notificationEnabled: Plasmoid.configuration.notificationEnabled
+    // Notification configuration properties with proper fallbacks
+    property bool notificationEnabled: Plasmoid.configuration.notificationEnabled !== undefined ? Plasmoid.configuration.notificationEnabled : false
+    property var notificationThreshold: Plasmoid.configuration.notificationThreshold !== undefined ? Plasmoid.configuration.notificationThreshold : 20
+
 
     // ═══════════════════════════════════════════════════════════════════════
     // DEVICE STATE
@@ -74,6 +78,7 @@ PlasmoidItem {
     property var realDevices: mergeDevices(providers.map(p => p.devices))
     property var hiddenDevices: []
     property var notificationEnabledDevices: []
+    property var notifiedLowBattery: []
 
     property int visibleDeviceCount: {
         var count = 0;
@@ -121,6 +126,82 @@ PlasmoidItem {
         id: copyFeedbackTimer
         interval: 2000
         onTriggered: root.commandCopied = false
+    }
+
+    // Notification
+    Notification {
+        id: batteryNotification
+        componentName: "plasma_workspace"
+        eventId: "notification"
+        title: "BatteryWatch"
+        text:  "BatteryWatch notification"
+        iconName: "battery-020"
+    }
+
+    onRealDevicesChanged: {
+        checkBatteryNotifications()
+    }
+
+    function isNotificationEnabled(device) {
+        var identity = DeviceUtils.deviceIdentity(device)
+
+        if (!identity)
+            return false
+
+            return notificationEnabledDevices.indexOf(identity) !== -1
+    }
+
+    function checkBatteryNotifications() {
+        var devices = realDevices || []
+
+        for (var i = 0; i < devices.length; i++) {
+            var device = devices[i]
+            if(!isNotificationEnabled(device)) {
+                continue
+            }
+            var identity = DeviceUtils.deviceIdentity(device)
+            if (!identity)
+                continue
+
+                var batteries = []
+
+                if (device.batteries && device.batteries.length > 0) {
+                    batteries = device.batteries
+                } else if (device.percentage !== undefined
+                    && device.percentage !== null) {
+                    batteries = [{
+                        percentage: device.percentage,
+                        label: ""
+                    }]
+                    }
+
+                    for (var j = 0; j < batteries.length; j++) {
+                        var battery = batteries[j]
+                        var percentage = Number(battery.percentage)
+
+                        if (!isFinite(percentage))
+                            continue
+
+                            var label = battery.label || ""
+                            var key = identity + ":" + (label || j)
+
+                            if (percentage <= notificationThreshold && percentage > 0) {
+                                if (!notifiedLowBattery[key]) {
+                                    notifiedLowBattery[key] = true
+
+                                    batteryNotification.title = "Low battery"
+                                    batteryNotification.text =
+                                    (device.name || "Device")
+                                    + (label ? " (" + label + ")" : "")
+                                    + " has " + percentage + "% battery remaining."
+
+                                    batteryNotification.sendEvent()
+                                }
+                            } else {
+                                delete notifiedLowBattery[key]
+                            }
+                    }
+        }
     }
 
     function buildTrayItems(devices, hidden) {
@@ -490,7 +571,7 @@ PlasmoidItem {
                     }
 
                     onClicked: {
-                        refreshDevices();
+                        refreshDevices()
                     }
                 }
             }
