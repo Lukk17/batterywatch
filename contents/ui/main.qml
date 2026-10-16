@@ -5,6 +5,7 @@ import org.kde.plasma.components 3.0 as PlasmaComponents
 import org.kde.plasma.core as PlasmaCore
 import org.kde.kirigami 2.20 as Kirigami
 import org.kde.plasma.plasma5support 2.0 as P5Support
+import org.kde.notification
 import "providers"
 import "DeviceUtils.js" as DeviceUtils
 
@@ -63,6 +64,11 @@ PlasmoidItem {
     // (the HID provider simulates a blocked device when debug is on)
     property var allDevices: debugMode ? testDevices.concat(realDevices) : realDevices
 
+    //Notification
+    property bool notificationEnabled: Plasmoid.configuration.notificationEnabled !== undefined ? Plasmoid.configuration.notificationEnabled : false
+    property var notificationThreshold: Plasmoid.configuration.notificationThreshold !== undefined ? Plasmoid.configuration.notificationThreshold : 20
+
+
     // ═══════════════════════════════════════════════════════════════════════
     // DEVICE STATE
     // ═══════════════════════════════════════════════════════════════════════
@@ -70,6 +76,8 @@ PlasmoidItem {
     // Merged devices from all providers
     property var realDevices: mergeDevices(providers.map(p => p.devices))
     property var hiddenDevices: []
+    property var notificationEnabledDevices: []
+    property var notifiedLowBattery: []
 
     property int visibleDeviceCount: {
         var count = 0;
@@ -117,6 +125,89 @@ PlasmoidItem {
         id: copyFeedbackTimer
         interval: 2000
         onTriggered: root.commandCopied = false
+    }
+
+    // Notification
+    Notification {
+        id: batteryNotification
+        componentName: "plasma_workspace" //this is easier than trying to place .nofifyrc file
+        eventId: "notification"
+        title: "BatteryWatch"
+        text:  "BatteryWatch notification"
+        iconName: "battery-020"
+    }
+
+    onRealDevicesChanged: {
+        checkBatteryNotifications()
+    }
+
+    function isNotificationEnabled(device) {
+        var identity = DeviceUtils.deviceIdentity(device);
+
+        if (!identity) {
+            return false;
+        }
+
+        return notificationEnabledDevices.indexOf(identity) !== -1;
+    }
+
+    function checkBatteryNotifications() {
+        if (!notificationEnabled) {
+            return;
+        }
+        var devices = realDevices || [];
+
+        for (var i = 0; i < devices.length; i++) {
+            var device = devices[i];
+            if(!isNotificationEnabled(device)) {
+                continue;
+            }
+            var identity = DeviceUtils.deviceIdentity(device);
+            if (!identity) {
+                continue;
+            }
+
+            var batteries = [];
+
+            if (device.batteries && device.batteries.length > 0) {
+                batteries = device.batteries;
+            } else if (device.percentage !== undefined
+                && device.percentage !== null) {
+                batteries = [{
+                    percentage: device.percentage,
+                    label: ""
+                }];
+            }
+
+            for (var j = 0; j < batteries.length; j++) {
+                var battery = batteries[j];
+                var percentage = Number(battery.percentage);
+
+                if (!isFinite(percentage)) {
+                    continue;
+                }
+
+                var label = battery.label || "";
+                var key = identity + ":" + (label || j);
+
+                //greater than 0 since some devices show 0% when turned off.
+                if (percentage <= notificationThreshold && percentage > 0) {
+                    if (!notifiedLowBattery[key]) {
+                        notifiedLowBattery[key] = true;
+
+                        batteryNotification.title = i18n("Low battery");
+                        batteryNotification.text = i18n(
+                        (device.name || "Device")
+                        + (label ? " (" + label + ")" : "")
+                        + " has " + percentage + "% battery remaining.");
+
+                        batteryNotification.sendEvent();
+                    }
+                } else {
+                    delete notifiedLowBattery[key];
+                }
+            }
+        }
     }
 
     function buildTrayItems(devices, hidden) {
@@ -301,19 +392,33 @@ PlasmoidItem {
 
     Component.onCompleted: {
         loadHiddenDevices();
+        loadNotificationEnabledDevices();
     }
 
     function loadHiddenDevices() {
         var saved = Plasmoid.configuration.hiddenDevices;
         if (saved) {
-            hiddenDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s));
+            hiddenDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s.trim()));
         } else {
             hiddenDevices = [];
         }
     }
 
+    function loadNotificationEnabledDevices() {
+        var saved = Plasmoid.configuration.notificationEnabledDevices;
+        if (saved) {
+            notificationEnabledDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s.trim()));
+        } else {
+            notificationEnabledDevices = [];
+        }
+    }
+
     function saveHiddenDevices() {
-        Plasmoid.configuration.hiddenDevices = hiddenDevices.join(i18n(", "));
+        Plasmoid.configuration.hiddenDevices = hiddenDevices.join(i18n(","));
+    }
+
+    function saveNotificationEnabledDevices() {
+        Plasmoid.configuration.notificationEnabledDevices = notificationEnabledDevices.join(i18n(","));
     }
 
     function toggleDeviceVisibility(device) {
@@ -326,6 +431,18 @@ PlasmoidItem {
         }
         hiddenDevices = hiddenDevices.slice();
         saveHiddenDevices();
+    }
+
+    function toggleDeviceNotification(device) {
+        var id = DeviceUtils.deviceIdentity(device);
+        var index = notificationEnabledDevices.indexOf(id);
+        if (index === -1) {
+            notificationEnabledDevices.push(id);
+        } else {
+            notificationEnabledDevices.splice(index, 1);
+        }
+        notificationEnabledDevices = notificationEnabledDevices.slice();
+        saveNotificationEnabledDevices();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -606,6 +723,25 @@ PlasmoidItem {
 
                                             PlasmaComponents.ToolTip {
                                                 text: root.hiddenDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? i18n("Hide from tray") : i18n("Show in tray")
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onPressed: mouse.accepted = false
+                                            }
+                                        }
+
+                                        PlasmaComponents.ToolButton {
+                                            visible: notificationEnabled
+                                            icon.name: root.notificationEnabledDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? "notification-disabled" : "notification-active"
+                                            text: root.notificationEnabledDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? i18n("Enable Notification") : i18n("Disable Notification")
+                                            display: PlasmaComponents.AbstractButton.IconOnly
+                                            onClicked: toggleDeviceNotification(device)
+
+                                            PlasmaComponents.ToolTip {
+                                                text: root.notificationEnabledDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? i18n("Enable Notification") : i18n("Disable Notification")
                                             }
 
                                             MouseArea {
