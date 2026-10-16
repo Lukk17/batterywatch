@@ -152,6 +152,9 @@ PlasmoidItem {
     }
 
     function checkBatteryNotifications() {
+        if (!notificationEnabled) {
+            return;
+        }
         var devices = realDevices || [];
 
         for (var i = 0; i < devices.length; i++) {
@@ -192,11 +195,11 @@ PlasmoidItem {
                     if (!notifiedLowBattery[key]) {
                         notifiedLowBattery[key] = true;
 
-                        batteryNotification.title = "Low battery";
-                        batteryNotification.text =
+                        batteryNotification.title = i18n("Low battery");
+                        batteryNotification.text = i18n(
                         (device.name || "Device")
                         + (label ? " (" + label + ")" : "")
-                        + " has " + percentage + "% battery remaining.";
+                        + " has " + percentage + "% battery remaining.");
 
                         batteryNotification.sendEvent();
                     }
@@ -395,7 +398,7 @@ PlasmoidItem {
     function loadHiddenDevices() {
         var saved = Plasmoid.configuration.hiddenDevices;
         if (saved) {
-            hiddenDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s));
+            hiddenDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s.trim()));
         } else {
             hiddenDevices = [];
         }
@@ -404,18 +407,18 @@ PlasmoidItem {
     function loadNotificationEnabledDevices() {
         var saved = Plasmoid.configuration.notificationEnabledDevices;
         if (saved) {
-            notificationEnabledDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s));
+            notificationEnabledDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s.trim()));
         } else {
             notificationEnabledDevices = [];
         }
     }
 
     function saveHiddenDevices() {
-        Plasmoid.configuration.hiddenDevices = hiddenDevices.join(i18n(", "));
+        Plasmoid.configuration.hiddenDevices = hiddenDevices.join(i18n(","));
     }
 
     function saveNotificationEnabledDevices() {
-        Plasmoid.configuration.notificationEnabledDevices = notificationEnabledDevices.join(i18n(", "));
+        Plasmoid.configuration.notificationEnabledDevices = notificationEnabledDevices.join(i18n(","));
     }
 
     function toggleDeviceVisibility(device) {

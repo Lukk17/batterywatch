@@ -13,6 +13,7 @@ KCMUtils.SimpleKCM {
 
     Kirigami.FormLayout {
         id: page
+        readonly property int boxWidth: Kirigami.Units.gridUnit * 3
 
         QQL.RowLayout {
             Kirigami.FormData.label: i18n("Enable Notification")
