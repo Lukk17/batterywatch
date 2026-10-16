@@ -145,63 +145,66 @@ PlasmoidItem {
     function isNotificationEnabled(device) {
         var identity = DeviceUtils.deviceIdentity(device)
 
-        if (!identity)
-            return false
+        if (!identity) {
+            return false;
+        }
 
-            return notificationEnabledDevices.indexOf(identity) !== -1
+        return notificationEnabledDevices.indexOf(identity) !== -1;
     }
 
     function checkBatteryNotifications() {
-        var devices = realDevices || []
+        var devices = realDevices || [];
 
         for (var i = 0; i < devices.length; i++) {
-            var device = devices[i]
+            var device = devices[i];
             if(!isNotificationEnabled(device)) {
-                continue
+                continue;
             }
-            var identity = DeviceUtils.deviceIdentity(device)
-            if (!identity)
-                continue
+            var identity = DeviceUtils.deviceIdentity(device);
+            if (!identity) {
+                continue;
+            }
 
-                var batteries = []
+            var batteries = [];
 
-                if (device.batteries && device.batteries.length > 0) {
-                    batteries = device.batteries
-                } else if (device.percentage !== undefined
-                    && device.percentage !== null) {
-                    batteries = [{
-                        percentage: device.percentage,
-                        label: ""
-                    }]
+            if (device.batteries && device.batteries.length > 0) {
+                batteries = device.batteries;
+            } else if (device.percentage !== undefined
+                && device.percentage !== null) {
+                batteries = [{
+                    percentage: device.percentage,
+                    label: ""
+                }];
+            }
+
+                for (var j = 0; j < batteries.length; j++) {
+                    var battery = batteries[j];
+                    var percentage = Number(battery.percentage);
+
+                    if (!isFinite(percentage)) {
+                        continue;
                     }
 
-                    for (var j = 0; j < batteries.length; j++) {
-                        var battery = batteries[j]
-                        var percentage = Number(battery.percentage)
+                    var label = battery.label || "";
+                    var key = identity + ":" + (label || j);
 
-                        if (!isFinite(percentage))
-                            continue
+                    //greater than 0 since some devices show 0% when turned off.
+                    if (percentage <= notificationThreshold && percentage > 0) {
+                        if (!notifiedLowBattery[key]) {
+                            notifiedLowBattery[key] = true;
 
-                            var label = battery.label || ""
-                            var key = identity + ":" + (label || j)
+                            batteryNotification.title = "Low battery";
+                            batteryNotification.text =
+                            (device.name || "Device")
+                            + (label ? " (" + label + ")" : "")
+                            + " has " + percentage + "% battery remaining.";
 
-                            //greater than 0 since some devices show 0% when turned off.
-                            if (percentage <= notificationThreshold && percentage > 0) {
-                                if (!notifiedLowBattery[key]) {
-                                    notifiedLowBattery[key] = true
-
-                                    batteryNotification.title = "Low battery"
-                                    batteryNotification.text =
-                                    (device.name || "Device")
-                                    + (label ? " (" + label + ")" : "")
-                                    + " has " + percentage + "% battery remaining."
-
-                                    batteryNotification.sendEvent()
-                                }
-                            } else {
-                                delete notifiedLowBattery[key]
-                            }
+                            batteryNotification.sendEvent();
+                        }
+                    } else {
+                        delete notifiedLowBattery[key];
                     }
+                }
         }
     }
 
