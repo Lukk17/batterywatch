@@ -65,7 +65,6 @@ PlasmoidItem {
     property var allDevices: debugMode ? testDevices.concat(realDevices) : realDevices
 
     //Notification
-    // Notification configuration properties with proper fallbacks
     property bool notificationEnabled: Plasmoid.configuration.notificationEnabled !== undefined ? Plasmoid.configuration.notificationEnabled : false
     property var notificationThreshold: Plasmoid.configuration.notificationThreshold !== undefined ? Plasmoid.configuration.notificationThreshold : 20
 
@@ -143,7 +142,7 @@ PlasmoidItem {
     }
 
     function isNotificationEnabled(device) {
-        var identity = DeviceUtils.deviceIdentity(device)
+        var identity = DeviceUtils.deviceIdentity(device);
 
         if (!identity) {
             return false;
@@ -177,34 +176,34 @@ PlasmoidItem {
                 }];
             }
 
-                for (var j = 0; j < batteries.length; j++) {
-                    var battery = batteries[j];
-                    var percentage = Number(battery.percentage);
+            for (var j = 0; j < batteries.length; j++) {
+                var battery = batteries[j];
+                var percentage = Number(battery.percentage);
 
-                    if (!isFinite(percentage)) {
-                        continue;
-                    }
-
-                    var label = battery.label || "";
-                    var key = identity + ":" + (label || j);
-
-                    //greater than 0 since some devices show 0% when turned off.
-                    if (percentage <= notificationThreshold && percentage > 0) {
-                        if (!notifiedLowBattery[key]) {
-                            notifiedLowBattery[key] = true;
-
-                            batteryNotification.title = "Low battery";
-                            batteryNotification.text =
-                            (device.name || "Device")
-                            + (label ? " (" + label + ")" : "")
-                            + " has " + percentage + "% battery remaining.";
-
-                            batteryNotification.sendEvent();
-                        }
-                    } else {
-                        delete notifiedLowBattery[key];
-                    }
+                if (!isFinite(percentage)) {
+                    continue;
                 }
+
+                var label = battery.label || "";
+                var key = identity + ":" + (label || j);
+
+                //greater than 0 since some devices show 0% when turned off.
+                if (percentage <= notificationThreshold && percentage > 0) {
+                    if (!notifiedLowBattery[key]) {
+                        notifiedLowBattery[key] = true;
+
+                        batteryNotification.title = "Low battery";
+                        batteryNotification.text =
+                        (device.name || "Device")
+                        + (label ? " (" + label + ")" : "")
+                        + " has " + percentage + "% battery remaining.";
+
+                        batteryNotification.sendEvent();
+                    }
+                } else {
+                    delete notifiedLowBattery[key];
+                }
+            }
         }
     }
 
