@@ -387,6 +387,7 @@ PlasmoidItem {
 
     Component.onCompleted: {
         loadHiddenDevices();
+        loadNotificationEnabledDevices();
     }
 
     function loadHiddenDevices() {
@@ -395,6 +396,15 @@ PlasmoidItem {
             hiddenDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s));
         } else {
             hiddenDevices = [];
+        }
+    }
+
+    function loadNotificationEnabledDevices() {
+        var saved = Plasmoid.configuration.notificationEnabledDevices;
+        if (saved) {
+            notificationEnabledDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s));
+        } else {
+            notificationEnabledDevices = [];
         }
     }
 
