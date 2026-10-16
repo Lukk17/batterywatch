@@ -141,6 +141,14 @@ PlasmoidItem {
         checkBatteryNotifications()
     }
 
+    onNotificationEnabledChanged: {
+        checkBatteryNotifications()
+    }
+
+    onNotificationThresholdChanged: {
+        checkBatteryNotifications()
+    }
+
     function isNotificationEnabled(device) {
         var identity = DeviceUtils.deviceIdentity(device);
 
@@ -175,7 +183,8 @@ PlasmoidItem {
                 && device.percentage !== null) {
                 batteries = [{
                     percentage: device.percentage,
-                    label: ""
+                    label: "",
+                    charging: device.charging
                 }];
             }
 
@@ -184,6 +193,10 @@ PlasmoidItem {
                 var percentage = Number(battery.percentage);
 
                 if (!isFinite(percentage)) {
+                    continue;
+                }
+
+                if (battery.charging === true) {
                     continue;
                 }
 
@@ -196,10 +209,10 @@ PlasmoidItem {
                         notifiedLowBattery[key] = true;
 
                         batteryNotification.title = i18n("Low battery");
-                        batteryNotification.text = i18n(
-                        (device.name || "Device")
-                        + (label ? " (" + label + ")" : "")
-                        + " has " + percentage + "% battery remaining.");
+                        batteryNotification.text = i18n("%1%2 has %3% battery remaining",
+                            device.name || i18n("Device"),
+                            label ? " (" + label + ")" : "",
+                            percentage);
 
                         batteryNotification.sendEvent();
                     }
@@ -414,11 +427,11 @@ PlasmoidItem {
     }
 
     function saveHiddenDevices() {
-        Plasmoid.configuration.hiddenDevices = hiddenDevices.join(i18n(","));
+        Plasmoid.configuration.hiddenDevices = hiddenDevices.join(",");
     }
 
     function saveNotificationEnabledDevices() {
-        Plasmoid.configuration.notificationEnabledDevices = notificationEnabledDevices.join(i18n(","));
+        Plasmoid.configuration.notificationEnabledDevices = notificationEnabledDevices.join(",");
     }
 
     function toggleDeviceVisibility(device) {
