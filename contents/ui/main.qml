@@ -584,7 +584,7 @@ PlasmoidItem {
                     }
 
                     onClicked: {
-                        refreshDevices()
+                        refreshDevices();
                     }
                 }
             }
