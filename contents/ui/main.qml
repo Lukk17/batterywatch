@@ -76,7 +76,7 @@ PlasmoidItem {
     // Merged devices from all providers
     property var realDevices: mergeDevices(providers.map(p => p.devices))
     property var hiddenDevices: []
-    property var notificationEnabledDevices: []
+    property var notificationMutedDevices: []
     property var notifiedLowBattery: []
 
     property int visibleDeviceCount: {
@@ -128,16 +128,26 @@ PlasmoidItem {
     }
 
     // Notification
-    Notification {
-        id: batteryNotification
-        componentName: "plasma_workspace" //this is easier than trying to place .nofifyrc file
-        eventId: "notification"
-        title: "BatteryWatch"
-        text:  "BatteryWatch notification"
-        iconName: "battery-020"
+    // Allow multiple notification objects to protect agains race condition when multiple low batteries alerts simultaneously
+    Component {
+        id: batteryNotificationComponent
+        Notification {
+            componentName: "plasma_workspace" //this is easier than trying to place .nofifyrc file
+            eventId: "notification"
+            iconName: "battery-020"
+            onClosed: destroy()
+        }
     }
 
-    onRealDevicesChanged: {
+    onAllDevicesChanged: {
+        checkBatteryNotifications()
+    }
+
+    onNotificationEnabledChanged: {
+        checkBatteryNotifications()
+    }
+
+    onNotificationThresholdChanged: {
         checkBatteryNotifications()
     }
 
@@ -148,20 +158,21 @@ PlasmoidItem {
             return false;
         }
 
-        return notificationEnabledDevices.indexOf(identity) !== -1;
+        return notificationMutedDevices.indexOf(identity) === -1;
     }
 
     function checkBatteryNotifications() {
         if (!notificationEnabled) {
             return;
         }
-        var devices = realDevices || [];
 
+        var devices = allDevices || [];
         for (var i = 0; i < devices.length; i++) {
             var device = devices[i];
             if(!isNotificationEnabled(device)) {
                 continue;
             }
+
             var identity = DeviceUtils.deviceIdentity(device);
             if (!identity) {
                 continue;
@@ -175,7 +186,8 @@ PlasmoidItem {
                 && device.percentage !== null) {
                 batteries = [{
                     percentage: device.percentage,
-                    label: ""
+                    label: "",
+                    charging: device.charging
                 }];
             }
 
@@ -187,24 +199,29 @@ PlasmoidItem {
                     continue;
                 }
 
+                if (battery.charging === true) {
+                    continue;
+                }
+
                 var label = battery.label || "";
                 var key = identity + ":" + (label || j);
 
                 //greater than 0 since some devices show 0% when turned off.
-                if (percentage <= notificationThreshold && percentage > 0) {
-                    if (!notifiedLowBattery[key]) {
-                        notifiedLowBattery[key] = true;
-
-                        batteryNotification.title = i18n("Low battery");
-                        batteryNotification.text = i18n(
-                        (device.name || "Device")
-                        + (label ? " (" + label + ")" : "")
-                        + " has " + percentage + "% battery remaining.");
-
-                        batteryNotification.sendEvent();
-                    }
-                } else {
+                if (percentage > notificationThreshold || percentage <= 0) {
                     delete notifiedLowBattery[key];
+                    continue;
+                } 
+
+                if (!notifiedLowBattery[key]) {
+                    notifiedLowBattery[key] = true;
+
+                    batteryNotificationComponent.createObject(root, {
+                        title: i18n("Low battery"),
+                        text: i18n("%1%2 has %3% battery remaining",
+                            device.name || i18n("Device"),
+                            label ? " (" + label + ")" : "",
+                            percentage)
+                    }).sendEvent();
                 }
             }
         }
@@ -392,7 +409,7 @@ PlasmoidItem {
 
     Component.onCompleted: {
         loadHiddenDevices();
-        loadNotificationEnabledDevices();
+        loadNotificationMutedDevices();
     }
 
     function loadHiddenDevices() {
@@ -404,21 +421,21 @@ PlasmoidItem {
         }
     }
 
-    function loadNotificationEnabledDevices() {
-        var saved = Plasmoid.configuration.notificationEnabledDevices;
+    function loadNotificationMutedDevices() {
+        var saved = Plasmoid.configuration.notificationMutedDevices;
         if (saved) {
-            notificationEnabledDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s.trim()));
+            notificationMutedDevices = saved.split(",").filter(s => s.length > 0).map(s => DeviceUtils.canonicalSerial(s.trim()));
         } else {
-            notificationEnabledDevices = [];
+            notificationMutedDevices = [];
         }
     }
 
     function saveHiddenDevices() {
-        Plasmoid.configuration.hiddenDevices = hiddenDevices.join(i18n(","));
+        Plasmoid.configuration.hiddenDevices = hiddenDevices.join(",");
     }
 
-    function saveNotificationEnabledDevices() {
-        Plasmoid.configuration.notificationEnabledDevices = notificationEnabledDevices.join(i18n(","));
+    function saveNotificationMutedDevices() {
+        Plasmoid.configuration.notificationMutedDevices = notificationMutedDevices.join(",");
     }
 
     function toggleDeviceVisibility(device) {
@@ -435,14 +452,21 @@ PlasmoidItem {
 
     function toggleDeviceNotification(device) {
         var id = DeviceUtils.deviceIdentity(device);
-        var index = notificationEnabledDevices.indexOf(id);
+        var index = notificationMutedDevices.indexOf(id);
         if (index === -1) {
-            notificationEnabledDevices.push(id);
+            notificationMutedDevices.push(id);
         } else {
-            notificationEnabledDevices.splice(index, 1);
+            notificationMutedDevices.splice(index, 1);
         }
-        notificationEnabledDevices = notificationEnabledDevices.slice();
-        saveNotificationEnabledDevices();
+
+        notificationMutedDevices = notificationMutedDevices.slice();
+        saveNotificationMutedDevices();
+
+        // allow the device to notify again, so the user gets an indication the unmute worked
+        Object.keys(notifiedLowBattery)
+            .filter(key => key.startsWith(id + ":"))
+            .forEach(key => delete notifiedLowBattery[key]);
+        checkBatteryNotifications();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -735,13 +759,13 @@ PlasmoidItem {
 
                                         PlasmaComponents.ToolButton {
                                             visible: notificationEnabled
-                                            icon.name: root.notificationEnabledDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? "notification-disabled" : "notification-active"
-                                            text: root.notificationEnabledDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? i18n("Enable Notification") : i18n("Disable Notification")
+                                            icon.name: root.notificationMutedDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? "notification-active" : "notification-disabled"
+                                            text: root.notificationMutedDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? i18n("Disable Notification") : i18n("Enable Notification")
                                             display: PlasmaComponents.AbstractButton.IconOnly
                                             onClicked: toggleDeviceNotification(device)
 
                                             PlasmaComponents.ToolTip {
-                                                text: root.notificationEnabledDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? i18n("Enable Notification") : i18n("Disable Notification")
+                                                text: root.notificationMutedDevices.indexOf(DeviceUtils.deviceIdentity(device)) === -1 ? i18n("Disable Notification") : i18n("Enable Notification")
                                             }
 
                                             MouseArea {

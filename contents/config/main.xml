@@ -183,7 +183,7 @@
     <entry name="notificationThreshold" type="Int">
       <default>20</default>
     </entry>
-    <entry name="notificationEnabledDevices" type="String">
+    <entry name="notificationMutedDevices" type="String">
       <default />
     </entry>
   </group>
