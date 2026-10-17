@@ -4,7 +4,7 @@
 
 ### Added
 - **BlueZ integration** — battery percentage of connected Bluetooth devices that report battery to BlueZ but not to UPower (e.g. 8bitdo controllers), read through `bluetoothctl` with a configurable polling interval (default 5s) and a disconnect action. Charging is reported as unknown rather than "not charging", so a provider that knows the state fills it in (contributed by @birrkan)
-- **Low-battery notifications** — a threshold setting and a per-device bell toggle in the popup send a system notification when a battery falls below it; a battery warns once per discharge — never while charging, and again only after charging back above the threshold — and the per-device list survives restarts (contributed by @YourM4jesty, issue #60)
+- **Low-battery notifications** — enable alerts, and set a battery threshold; use the popup's bell toggle to mute individual devices. BatteryWatch sends one system notification when a monitored battery is at or below the threshold and not charging; it can alert again after the battery rises above the threshold and later drops low again. Muted devices are saved across restarts (contributed by @YourM4jesty, issue #60)
 
 ### Changed
 - **Providers fill each other's gaps** — a device reported by two providers is one entry: the higher-priority reading stays, and the later provider fills what it left missing — a percentage it does not have, or the charging state it cannot know. A permission-blocked entry is replaced as soon as another provider reads the device
