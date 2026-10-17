@@ -128,16 +128,18 @@ PlasmoidItem {
     }
 
     // Notification
-    Notification {
-        id: batteryNotification
-        componentName: "plasma_workspace" //this is easier than trying to place .nofifyrc file
-        eventId: "notification"
-        title: "BatteryWatch"
-        text:  "BatteryWatch notification"
-        iconName: "battery-020"
+    // Allow multiple notification objects to protect agains race condition when multiple low batteries alerts simultaneously
+    Component {
+        id: batteryNotificationComponent
+        Notification {
+            componentName: "plasma_workspace" //this is easier than trying to place .nofifyrc file
+            eventId: "notification"
+            iconName: "battery-020"
+            onClosed: destroy()
+        }
     }
 
-    onRealDevicesChanged: {
+    onAllDevicesChanged: {
         checkBatteryNotifications()
     }
 
@@ -164,7 +166,7 @@ PlasmoidItem {
             return;
         }
 
-        var devices = realDevices || [];
+        var devices = allDevices || [];
         for (var i = 0; i < devices.length; i++) {
             var device = devices[i];
             if(!isNotificationEnabled(device)) {
@@ -213,13 +215,13 @@ PlasmoidItem {
                 if (!notifiedLowBattery[key]) {
                     notifiedLowBattery[key] = true;
 
-                    batteryNotification.title = i18n("Low battery");
-                    batteryNotification.text = i18n("%1%2 has %3% battery remaining",
-                        device.name || i18n("Device"),
-                        label ? " (" + label + ")" : "",
-                        percentage);
-
-                    batteryNotification.sendEvent();
+                    batteryNotificationComponent.createObject(root, {
+                        title: i18n("Low battery"),
+                        text: i18n("%1%2 has %3% battery remaining",
+                            device.name || i18n("Device"),
+                            label ? " (" + label + ")" : "",
+                            percentage)
+                    }).sendEvent();
                 }
             }
         }
