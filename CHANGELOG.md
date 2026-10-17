@@ -14,7 +14,7 @@
 ### Contributors
 - @birrkan — BlueZ integration (initial BluezQt implementation, reworked to bluetoothctl during review)
 - @CorneliusKluge — issue #2: tireless on-device testing across many builds, from the first hidraw diagnostics to confirming the Flatpak discovery on his Flathub setup; his detailed reports and patience shaped this whole integration — thank you!
-- @YourM4jesty — low-battery notifications (threshold setting, per-device toggle, persistence and review fixes)
+- @YourM4jesty — low-battery notifications (threshold setting, per-device toggle, and muted devices list persistence)
 
 ## [0.3.2] - 2026-10-05
 
